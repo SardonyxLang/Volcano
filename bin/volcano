@@ -1,0 +1,105 @@
+#!/usr/bin/ruby
+
+require 'optparse'
+require 'net/http'
+require 'fileutils'
+require 'zip'
+
+helptext = %{
+Volcano v 0.1.0
+Usage: volcano command [args]...
+Commands:
+    help: print this help text.
+    install: install a package.
+    uninstall: remove a package.
+}
+
+options = {}
+OptionParser.new do |parser|
+    parser.banner = helptext
+end.parse!
+
+config = File.join (File.expand_path "~"), ".volcano"
+
+unless File.directory? "#{config}"
+    puts "\x1b[0;33mNo config directory, creating one at #{config}...\x1b[0;0m"
+    puts "Please add `source #{config}/env` to your shell rc file."
+    Dir.mkdir config
+end
+
+File.write "#{config}/env", "export SDX_PATH=#{config}"
+
+if ARGV.empty?
+    puts helptext
+    exit 1
+end
+
+op = ARGV.shift
+
+case op
+when "help"
+    puts helptext
+    exit 0
+when "install"
+    if ARGV.empty?
+        puts helptext
+        exit 1
+    end
+    repo = ARGV.shift
+    unless /^[A-Za-z0-9-]+\/[A-Za-z0-9-]+$/ =~ repo
+        puts "\x1b[0;31mError: invalid repo #{repo}"
+        exit 1
+    end
+    last = (repo.split "/")[-1]
+    puts "Downloading github.com/#{repo}..."
+    Net::HTTP.start "api.github.com", :use_ssl => true do |http|
+        resp = http.get "/repos/#{repo}/zipball/master"
+        case resp
+        when Net::HTTPRedirection
+            uri = resp['location']
+            uri = URI.parse uri
+            Net::HTTP.start uri.host, uri.port, :use_ssl => true do |http|
+                resp = Net::HTTP.get uri
+                FileUtils.rm_rf "#{config}/#{last}"
+                Dir.mkdir "#{config}/#{last}"
+                Zip::InputStream.open (StringIO.new resp) do |io|
+                    entries = []
+                    while entry = io.get_next_entry
+                        entries << entry.name
+                        unless entry.name.end_with? "/"
+                            dirname = File.dirname entry.name
+                            dirname = (dirname.split "/")[1..-1].join "/"
+                            name = File.join dirname, (File.basename entry.name)
+                            if name[0] == "/"
+                                name = name[1..-1]
+                            end
+                            FileUtils.mkdir_p (File.join "#{config}/#{last}", dirname)
+                            File.write "#{config}/#{last}/#{name}", io.read
+                        end
+                    end
+                    env = File.read "#{config}/env"
+                    File.write "#{config}/env", "#{env}:#{config}/#{last}:#{config}/#{last}/lib"
+                    FileUtils.rm_rf "#{config}/#{entries[0]}"
+                end
+            end
+        else
+            puts "\x1b[0;31mError: invalid repo #{repo}"
+            exit 1
+        end
+    end
+when "uninstall"
+    if ARGV.empty?
+        puts helptext
+        exit 1
+    end
+    repo = ARGV.shift
+    unless /^[A-Za-z0-9-]+$/ =~ repo
+        puts "\x1b[0;31mError: invalid repo #{repo}"
+        exit 1
+    end
+    if File.directory? "#{config}/#{repo}"
+        FileUtils.rm_rf "#{config}/#{repo}"
+    else
+        puts "\x1b[0;31mError: library #{repo} is not installed\x1b[0;0m"
+    end
+end
